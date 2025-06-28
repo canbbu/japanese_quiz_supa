@@ -1,14 +1,26 @@
 'use client'
 
 import React, { useState, useEffect } from 'react'
-import { supabase, Word } from '../lib/supabase'
+import { supabase, Word, getUserWords, addUserWord, getUserWordsByDate, getUserWordsByDateGroups } from '../lib/supabase'
 
 export default function Home() {
+  // 사용자 관련 상태
+  const [currentUser, setCurrentUser] = useState<string>('')
+  const [tempUserName, setTempUserName] = useState<string>('')
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false)
+  
+  // 단어 관련 상태
   const [vocabulary, setVocabulary] = useState<Word[]>([])
+  const [wordsByDate, setWordsByDate] = useState<{ [key: string]: Word[] }>({})
+  const [viewMode, setViewMode] = useState<'all' | 'byDate'>('all')
+  const [selectedDate, setSelectedDate] = useState<string>('')
+  const [availableDates, setAvailableDates] = useState<string[]>([])
+  
   const [kanjiWord, setKanjiWord] = useState('')
   const [yomigana, setYomigana] = useState('')
   const [koreanMeaning, setKoreanMeaning] = useState('')
   const [isQuizMode, setIsQuizMode] = useState(false)
+  const [quizType, setQuizType] = useState<'all' | 'date'>('all')
   const [currentQuizWords, setCurrentQuizWords] = useState<Word[]>([])
   const [currentWordIndex, setCurrentWordIndex] = useState(0)
   const [wrongAnswers, setWrongAnswers] = useState<Word[]>([])
@@ -20,49 +32,63 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'wrongCount'>('newest')
 
-  // Supabase에서 단어 불러오기
+  // 로그인 상태 확인
   useEffect(() => {
-    fetchWords()
+    const savedUser = localStorage.getItem('quiz-user-name')
+    if (savedUser) {
+      setCurrentUser(savedUser)
+      setIsLoggedIn(true)
+    }
   }, [])
 
-  const fetchWords = async () => {
+  // 사용자별 단어 불러오기
+  useEffect(() => {
+    if (isLoggedIn && currentUser) {
+      fetchUserWords()
+    }
+  }, [isLoggedIn, currentUser])
+
+  // 사용자별 단어 불러오기
+  const fetchUserWords = async () => {
+    if (!currentUser) return
+    
     try {
       setLoading(true)
+      console.log('Fetching words for user:', currentUser)
       
-      console.log('Fetching words from Supabase...')
+      // 전체 단어와 날짜별 그룹화된 단어를 모두 가져오기
+      const [allWordsResult, dateGroupsResult] = await Promise.all([
+        getUserWords(currentUser),
+        getUserWordsByDateGroups(currentUser)
+      ])
       
-      // 먼저 deleted_at 필터로 시도
-      let { data, error } = await supabase
-        .from('japanese_quiz')
-        .select('*')
-        .eq('deleted_at', false)
-        .order('created_at', { ascending: false })
-
-      if (error) {
-        console.log('Failed with deleted_at filter, trying without filter:', error.message)
-        
-        // deleted_at 컬럼이 없거나 다른 문제가 있으면 모든 데이터를 가져와서 클라이언트에서 필터링
-        const { data: allData, error: simpleError } = await supabase
-          .from('japanese_quiz')
-          .select('*')
-          .order('id', { ascending: false })
-
-        if (simpleError) {
-          console.error('Error fetching words:', simpleError)
-          showMessageBox(`단어를 불러오는 중 오류: ${simpleError.message}`)
-          return
-        }
-
-        data = allData
+      if (allWordsResult.error) {
+        console.error('Error fetching user words:', allWordsResult.error)
+        showMessageBox(`단어를 불러오는 중 오류: ${allWordsResult.error.message}`)
+        return
       }
 
-      console.log('Raw data from Supabase:', data)
+      if (dateGroupsResult.error) {
+        console.error('Error fetching date groups:', dateGroupsResult.error)
+        showMessageBox(`날짜별 데이터를 불러오는 중 오류: ${dateGroupsResult.error.message}`)
+        return
+      }
+
+      console.log('User words:', allWordsResult.data)
+      console.log('Words by date:', dateGroupsResult.data)
       
-      // 클라이언트 사이드에서 삭제되지 않은 단어만 필터링
-      const activeWords = data?.filter(word => !word.deleted_at) || []
-      console.log('Filtered active words:', activeWords)
+      setVocabulary(allWordsResult.data || [])
+      setWordsByDate(dateGroupsResult.data || {})
       
-      setVocabulary(activeWords)
+      // 사용 가능한 날짜 목록 설정
+      const dates = Object.keys(dateGroupsResult.data || {}).sort((a, b) => b.localeCompare(a)) // 최신순
+      setAvailableDates(dates)
+      
+      // 선택된 날짜가 없거나 더 이상 존재하지 않으면 가장 최근 날짜로 설정
+      if (!selectedDate || !dates.includes(selectedDate)) {
+        setSelectedDate(dates[0] || '')
+      }
+      
     } catch (error) {
       console.error('Error:', error)
       showMessageBox(`데이터베이스 연결에 실패했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`)
@@ -70,6 +96,63 @@ export default function Home() {
       setLoading(false)
     }
   }
+
+  // 특정 날짜의 단어들 가져오기
+  const fetchWordsByDate = async (date: string) => {
+    if (!currentUser || !date) return
+    
+    try {
+      setLoading(true)
+      console.log('Fetching words for date:', date)
+      
+      const { data, error } = await getUserWordsByDate(currentUser, date)
+      
+      if (error) {
+        console.error('Error fetching words by date:', error)
+        showMessageBox(`날짜별 단어를 불러오는 중 오류: ${error.message}`)
+        return
+      }
+
+      console.log('Words for date:', data)
+      
+      // 날짜별 데이터 업데이트
+      setWordsByDate(prev => ({
+        ...prev,
+        [date]: data || []
+      }))
+      
+    } catch (error) {
+      console.error('Error:', error)
+      showMessageBox(`데이터베이스 연결에 실패했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 사용자 로그인
+  const loginUser = () => {
+    if (!tempUserName.trim()) {
+      showMessageBox('이름을 입력해주세요.')
+      return
+    }
+    
+    const userName = tempUserName.trim()
+    setCurrentUser(userName)
+    setIsLoggedIn(true)
+    localStorage.setItem('quiz-user-name', userName)
+    setTempUserName('')
+  }
+
+  // 사용자 로그아웃
+  const logoutUser = () => {
+    setCurrentUser('')
+    setIsLoggedIn(false)
+    setVocabulary([])
+    localStorage.removeItem('quiz-user-name')
+  }
+
+  // 기존 fetchWords 함수 제거하고 fetchUserWords로 대체
+  const fetchWords = fetchUserWords
 
   // 배열 섞기 함수
   const shuffleArray = (array: Word[]) => {
@@ -108,9 +191,47 @@ export default function Home() {
     }
   }
 
+  // 현재 보기 모드에 따른 단어 목록 가져오기
+  const getCurrentWords = (): Word[] => {
+    if (viewMode === 'all') {
+      return vocabulary
+    } else if (viewMode === 'byDate' && selectedDate) {
+      return wordsByDate[selectedDate] || []
+    }
+    return []
+  }
+
+  // 날짜 형식 변환 함수 (YYYY-MM-DD -> YYYY년 MM월 DD일)
+  const formatDate = (dateString: string): string => {
+    const date = new Date(dateString)
+    return `${date.getFullYear()}년 ${(date.getMonth() + 1).toString().padStart(2, '0')}월 ${date.getDate().toString().padStart(2, '0')}일`
+  }
+
+  // 문자열 정규화 함수 (띄어쓰기, 쉼표, 특수문자 제거 및 소문자 변환)
+  const normalizeString = (str: string): string => {
+    return str
+      .toLowerCase()
+      .replace(/[\s,，、。！？!?]/g, '') // 띄어쓰기, 쉼표, 마침표, 느낌표, 물음표 제거
+      .trim()
+  }
+
+  // 정답 확인 개선 함수
+  const checkAnswerMatch = (userAnswer: string, correctAnswers: string[]): { isCorrect: boolean, matchedAnswer: string | null } => {
+    const normalizedUserAnswer = normalizeString(userAnswer)
+    
+    for (const correctAnswer of correctAnswers) {
+      const normalizedCorrectAnswer = normalizeString(correctAnswer)
+      if (normalizedUserAnswer === normalizedCorrectAnswer) {
+        return { isCorrect: true, matchedAnswer: correctAnswer.trim() }
+      }
+    }
+    
+    return { isCorrect: false, matchedAnswer: null }
+  }
+
   // 정렬된 단어 목록 가져오기
   const getSortedVocabulary = () => {
-    return sortWords(vocabulary, sortOrder)
+    return sortWords(getCurrentWords(), sortOrder)
   }
 
   // 메시지 박스 표시
@@ -125,22 +246,26 @@ export default function Home() {
       return
     }
 
+    if (!currentUser) {
+      showMessageBox('로그인이 필요합니다.')
+      return
+    }
+
     try {
       setLoading(true)
       
-      // 먼저 간단한 데이터만으로 시도
-      const wordData = {
+      const wordData: Omit<Word, 'id' | 'created_at'> = {
         kanji: kanjiWord.trim(),
         yomigana: yomigana.trim(),
-        korean: koreanMeaning.trim()
+        korean: koreanMeaning.trim(),
+        user_name: currentUser,
+        wrong_count: 0,
+        deleted_at: false
       }
       
-      console.log('Adding word with minimal data:', wordData)
+      console.log('Adding word with user data:', wordData)
 
-      const { data, error } = await supabase
-        .from('japanese_quiz')
-        .insert([wordData])
-        .select()
+      const { data, error } = await addUserWord(wordData)
 
       if (error) {
         console.error('Supabase error details:', error)
@@ -272,15 +397,45 @@ export default function Home() {
   }
 
   // 퀴즈 시작
-  const startQuiz = (wordsToQuiz: Word[]) => {
+  const startQuiz = (type: 'all' | 'date') => {
+    let wordsToQuiz: Word[] = []
+    
+    if (type === 'all') {
+      wordsToQuiz = vocabulary
+    } else if (type === 'date' && selectedDate) {
+      wordsToQuiz = wordsByDate[selectedDate] || []
+    }
+    
     if (wordsToQuiz.length === 0) {
-      showMessageBox('퀴즈를 시작하려면 단어를 먼저 추가해주세요.')
+      const message = type === 'all' 
+        ? '퀴즈를 시작하려면 단어를 먼저 추가해주세요.'
+        : '선택한 날짜에 등록된 단어가 없습니다.'
+      showMessageBox(message)
       return
     }
+    
+    setQuizType(type)
     setCurrentQuizWords(shuffleArray(wordsToQuiz))
     setCurrentWordIndex(0)
     setWrongAnswers([])
     setIsQuizMode(true)
+    setQuizCompleted(false)
+    setUserYomigana('')
+    setUserKoreanMeaning('')
+    setFeedback('')
+    setShowAnswer(false)
+  }
+
+  // 틀린 단어만 다시 풀기
+  const startWrongAnswersQuiz = () => {
+    if (wrongAnswers.length === 0) {
+      showMessageBox('틀린 단어가 없습니다.')
+      return
+    }
+    
+    setCurrentQuizWords(shuffleArray(wrongAnswers))
+    setCurrentWordIndex(0)
+    setWrongAnswers([])
     setQuizCompleted(false)
     setUserYomigana('')
     setUserKoreanMeaning('')
@@ -298,17 +453,38 @@ export default function Home() {
     const currentWord = currentQuizWords[currentWordIndex]
     
     // 요미가나 정답 확인 (콤마로 구분된 여러 요미가나 허용)
-    const correctYomiganas = currentWord.yomigana.split(',').map(m => m.trim().toLowerCase())
-    const isYomiganaCorrect = correctYomiganas.includes(userYomigana.toLowerCase())
+    const yomiganaOptions = currentWord.yomigana.split(',').map(m => m.trim())
+    const yomiganaResult = checkAnswerMatch(userYomigana, yomiganaOptions)
 
     // 한국어 뜻 정답 확인 (콤마로 구분된 여러 뜻 허용)
-    const correctKoreanMeanings = currentWord.korean.split(',').map(m => m.trim())
-    const isKoreanMeaningCorrect = correctKoreanMeanings.includes(userKoreanMeaning)
+    const koreanOptions = currentWord.korean.split(',').map(m => m.trim())
+    const koreanResult = checkAnswerMatch(userKoreanMeaning, koreanOptions)
 
-    if (isYomiganaCorrect && isKoreanMeaningCorrect) {
+    if (yomiganaResult.isCorrect && koreanResult.isCorrect) {
+      // 완전 정답
       setFeedback('정답입니다! 😊')
+    } else if (yomiganaResult.isCorrect || koreanResult.isCorrect) {
+      // 부분 정답
+      let feedbackMessage = '부분 정답입니다!\n\n'
+      
+      if (yomiganaResult.isCorrect) {
+        feedbackMessage += `✅ 요미가나: "${yomiganaResult.matchedAnswer}" (정답)\n`
+        feedbackMessage += `❌ 한국어 뜻: 정답은 "${currentWord.korean}" 입니다`
+      } else if (koreanResult.isCorrect) {
+        feedbackMessage += `❌ 요미가나: 정답은 "${currentWord.yomigana}" 입니다\n`
+        feedbackMessage += `✅ 한국어 뜻: "${koreanResult.matchedAnswer}" (정답)`
+      }
+      
+      setFeedback(feedbackMessage)
+      setWrongAnswers(prev => [...prev, currentWord])
+      
+      // 틀린 횟수 증가
+      if (currentWord.id) {
+        await incrementWrongCount(currentWord.id)
+      }
     } else {
-      setFeedback(`오답!\n정답 요미가나: "${currentWord.yomigana}"\n정답 한국어 뜻: "${currentWord.korean}"`)
+      // 완전 오답
+      setFeedback(`오답입니다! ❌\n\n정답 요미가나: "${currentWord.yomigana}"\n정답 한국어 뜻: "${currentWord.korean}"`)
       setWrongAnswers(prev => [...prev, currentWord])
       
       // 틀린 횟수 증가
@@ -366,10 +542,60 @@ export default function Home() {
     )
   }
 
+  // 로그인하지 않은 경우 이름 입력 화면
+  if (!isLoggedIn) {
+    return (
+      <div className="container">
+        <div className="max-w-md mx-auto mt-16 p-8 bg-white rounded-lg shadow-lg">
+          <h1 className="text-3xl font-bold text-center text-gray-800 mb-8">일본어 단어 퀴즈</h1>
+          <div className="space-y-4">
+            <div>
+              <label htmlFor="userName" className="block text-sm font-medium text-gray-700 mb-2">
+                사용자 이름을 입력해주세요
+              </label>
+              <input
+                type="text"
+                id="userName"
+                value={tempUserName}
+                onChange={(e) => setTempUserName(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && loginUser()}
+                placeholder="이름을 입력하세요"
+                className="w-full py-3 px-4 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                autoFocus
+              />
+            </div>
+            <button
+              onClick={loginUser}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md transition duration-300 ease-in-out"
+            >
+              시작하기
+            </button>
+          </div>
+          <div className="mt-6 text-sm text-gray-500 text-center">
+            입력한 이름으로 개인별 단어장이 관리됩니다.
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (!isQuizMode) {
     return (
       <div className="container">
-        <h1 className="text-3xl font-bold text-center text-gray-800 mb-8">일본어 단어 퀴즈</h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-3xl font-bold text-gray-800">일본어 단어 퀴즈</h1>
+          <div className="flex items-center space-x-4">
+            <span className="text-sm text-gray-600">
+              안녕하세요, <span className="font-semibold text-indigo-600">{currentUser}</span>님!
+            </span>
+            <button
+              onClick={logoutUser}
+              className="text-sm bg-gray-500 hover:bg-gray-600 text-white px-3 py-1 rounded transition duration-300"
+            >
+              로그아웃
+            </button>
+          </div>
+        </div>
 
         <div className="space-y-4 mb-8">
           <h2 className="text-xl font-semibold text-gray-700">새 단어 추가</h2>
@@ -421,10 +647,65 @@ export default function Home() {
             {loading ? '추가 중...' : '단어 추가'}
           </button>
 
+          {/* 보기 모드 선택 */}
+          <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-semibold text-gray-700">단어 보기</h3>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => setViewMode('all')}
+                  className={`px-3 py-1 text-sm rounded transition duration-300 ${
+                    viewMode === 'all' 
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                  disabled={loading}
+                >
+                  전체 보기
+                </button>
+                <button
+                  onClick={() => setViewMode('byDate')}
+                  className={`px-3 py-1 text-sm rounded transition duration-300 ${
+                    viewMode === 'byDate' 
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                  disabled={loading}
+                >
+                  날짜별 보기
+                </button>
+              </div>
+            </div>
+            
+            {viewMode === 'byDate' && (
+              <div className="mb-3">
+                <label htmlFor="dateSelect" className="block text-sm font-medium text-gray-700 mb-2">
+                  날짜 선택:
+                </label>
+                <select
+                  id="dateSelect"
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2"
+                  disabled={loading}
+                >
+                  {availableDates.map(date => (
+                    <option key={date} value={date}>
+                      {formatDate(date)} ({wordsByDate[date]?.length || 0}개)
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
           <div className="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
             <div className="flex justify-between items-center mb-3">
               <h3 className="text-lg font-semibold text-gray-700">
-                등록된 단어 ({vocabulary.length}개)
+                {viewMode === 'all' 
+                  ? `전체 단어 (${vocabulary.length}개)`
+                  : `${selectedDate ? formatDate(selectedDate) : '날짜 선택'} (${getCurrentWords().length}개)`
+                }
               </h3>
               <div className="flex items-center space-x-2">
                 <label htmlFor="sortOrder" className="text-sm text-gray-600">정렬:</label>
@@ -466,13 +747,26 @@ export default function Home() {
             </div>
           </div>
           
-          <button
-            onClick={() => startQuiz(vocabulary)}
-            disabled={vocabulary.length === 0 || loading}
-            className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md transition duration-300 ease-in-out mt-4 disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            퀴즈 시작
-          </button>
+          {/* 퀴즈 시작 버튼들 */}
+          <div className="space-y-2">
+            <button
+              onClick={() => startQuiz('all')}
+              disabled={vocabulary.length === 0 || loading}
+              className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md transition duration-300 ease-in-out disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+              전체 단어 퀴즈 시작 ({vocabulary.length}개)
+            </button>
+            
+            {viewMode === 'byDate' && selectedDate && (
+              <button
+                onClick={() => startQuiz('date')}
+                disabled={getCurrentWords().length === 0 || loading}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md transition duration-300 ease-in-out disabled:bg-gray-400 disabled:cursor-not-allowed"
+              >
+                {formatDate(selectedDate)} 단어 퀴즈 시작 ({getCurrentWords().length}개)
+              </button>
+            )}
+          </div>
         </div>
       </div>
     )
@@ -481,6 +775,23 @@ export default function Home() {
   if (quizCompleted) {
     return (
       <div className="container">
+        <div className="flex justify-between items-center mb-8">
+          <h2 className="text-2xl font-bold text-gray-800">
+            퀴즈 결과 - {quizType === 'all' ? '전체 단어' : `${selectedDate ? formatDate(selectedDate) : '날짜별'} 단어`}
+          </h2>
+          <div className="flex items-center space-x-4">
+            <span className="text-sm text-gray-600">
+              <span className="font-semibold text-indigo-600">{currentUser}</span>님
+            </span>
+            <button
+              onClick={logoutUser}
+              className="text-sm bg-gray-500 hover:bg-gray-600 text-white px-3 py-1 rounded transition duration-300"
+            >
+              로그아웃
+            </button>
+          </div>
+        </div>
+        
         <div className="space-y-6 text-center">
           <div className="word-display">퀴즈 종료!</div>
           <div className={`text-lg font-semibold ${wrongAnswers.length > 0 ? 'wrong-answer' : 'correct-answer'}`}>
@@ -492,7 +803,7 @@ export default function Home() {
           
           {wrongAnswers.length > 0 && (
             <button
-              onClick={() => startQuiz(wrongAnswers)}
+              onClick={() => startWrongAnswersQuiz()}
               className="w-full bg-orange-600 hover:bg-orange-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md transition duration-300 ease-in-out"
             >
               틀린 단어만 다시 풀기
@@ -514,6 +825,27 @@ export default function Home() {
 
   return (
     <div className="container">
+      <div className="flex justify-between items-center mb-6">
+        <h2 className="text-xl font-bold text-gray-800">
+          퀴즈 진행중 - {quizType === 'all' ? '전체 단어' : `${selectedDate ? formatDate(selectedDate) : '날짜별'} 단어`}
+        </h2>
+        <div className="flex items-center space-x-4">
+          <span className="text-sm text-gray-600">
+            <span className="font-semibold text-indigo-600">{currentUser}</span>님
+          </span>
+          <button
+            onClick={() => {
+              if (confirm('퀴즈를 종료하고 로그아웃하시겠습니까?')) {
+                logoutUser()
+              }
+            }}
+            className="text-sm bg-gray-500 hover:bg-gray-600 text-white px-3 py-1 rounded transition duration-300"
+          >
+            로그아웃
+          </button>
+        </div>
+      </div>
+      
       <div className="space-y-6 text-center">
         <div className="word-display">{currentWord?.kanji}</div>
         <div className="text-sm text-gray-500">
